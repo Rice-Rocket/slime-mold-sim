@@ -2,6 +2,10 @@ use macroquad::prelude::{Image, Color};
 use rand::distributions::{Distribution, Uniform};
 use std::{f32::consts::PI};
 
+use num_cpus;
+use std::sync::{Arc, Mutex};
+use rayon::prelude::*;
+
 #[path = "agent.rs"] mod agent;
 use self::agent::Agent;
 
@@ -145,6 +149,90 @@ impl Field {
             };
         };
         return sum;
+    }
+    pub fn update_multi(&mut self, dt: f32) {
+        let n_agents = self.agents.len();
+        let n_cpus = num_cpus::get();
+        let agents_per = n_agents / n_cpus;
+        let agents = self.agents.clone();
+        let mutex_agents = Mutex::new(agents);
+        let field = self.field.clone();
+        let mutex_field = Mutex::new(field);
+
+        (0..(n_cpus - 1)).into_par_iter().for_each(move |i| {
+            let start = i * agents_per;
+            let end = if i == (n_cpus - 1) { n_agents } else { (i + 1) * agents_per };
+
+            let rand_range = Uniform::from(0.0..1.0);
+            let mut rng = rand::thread_rng();
+            let mut new_agents = mutex_agents.lock().unwrap()[start..end].to_vec().clone();
+            let mut new_field = mutex_field.lock().unwrap().clone();
+
+            for agent in new_agents.iter_mut() {
+                let weight_forward = Field::sense(&self.field, agent, 0.0, self.settings.sense_distance, self.settings.sense_size, self.width, self.height);
+                let weight_left = Field::sense(&self.field, agent, self.settings.sense_angle_difference, self.settings.sense_distance, self.settings.sense_size, self.width, self.height);
+                let weight_right = Field::sense(&self.field, agent, -self.settings.sense_angle_difference, self.settings.sense_distance, self.settings.sense_size, self.width, self.height);
+
+                let steer_strength = rand_range.sample(&mut rng);
+                
+                if (weight_forward > weight_left) && (weight_forward > weight_right) {
+                } else if (weight_forward < weight_left) && (weight_forward < weight_right) {
+                    agent.angle += (steer_strength - 0.5) * 2.0 * self.settings.turn_speed * dt;
+                } else if weight_right > weight_left {
+                    agent.angle -= steer_strength * self.settings.turn_speed * dt;
+                } else if weight_left < weight_right {
+                    agent.angle += steer_strength * self.settings.turn_speed * dt;
+                }
+
+                let direction = (agent.angle.cos(), agent.angle.sin());
+                let mut new_x = agent.x + direction.0 * self.settings.move_speed * dt;
+                let mut new_y = agent.y + direction.1 * self.settings.move_speed * dt;
+
+                if (new_x < 0f32) || (new_x >= self.width as f32) || (new_y < 0f32) || (new_y >= self.height as f32) {
+                    new_x = (self.width as f32 - 1.01).min(0f32.max(new_x));
+                    new_y = (self.height as f32 - 1.01).min(0f32.max(new_y));
+                    agent.angle = rand_range.sample(&mut rng) * 2.0 * PI;
+                }
+
+                agent.x = new_x;
+                agent.y = new_y;
+            }
+
+            // let mut temp = self.field.clone();
+            for i in 0..self.width {
+                for j in 0..self.height {
+                    let mut sum = 0f64;
+                    for x in -1i32..=1 {
+                        for y in -1i32..=1 {
+                            let ix = i as i32 + x;
+                            let iy = j as i32 + y;
+                            if (ix >= 0) && (ix < self.width as i32) && (iy >= 0) && (iy < self.height as i32) {
+                                sum += self.field[ix as usize][iy as usize];
+                            }
+                        }
+                    }
+                    let blur = sum / 9.0;
+                    let diffused = (1.0 - (self.settings.diffuse_speed * dt)) as f64 * self.field[i as usize][j as usize] + (self.settings.diffuse_speed * dt) as f64 * blur;
+                    new_field[i as usize][j as usize] = 0f64.max(diffused - (self.settings.evaporation_speed * dt) as f64);
+                }
+            }
+            // new_field = temp.clone();
+
+            for agent in new_agents.iter() {
+                new_field[agent.x as usize][agent.y as usize] = 1.0;
+            }
+            
+            let mut a = mutex_agents.lock().unwrap();
+            for i in start..end {
+                a[i] = new_agents[i].clone();
+            }
+            let mut f = mutex_field.lock().unwrap();
+            for i in 0..(self.width as usize - 1) {
+                for j in 0..(self.height as usize - 1) {
+                    f[i][j] = new_field[i][j];
+                }
+            }
+        });
     }
     pub fn update(&mut self, dt: f32) {
         let rand_range = Uniform::from(0.0..1.0);

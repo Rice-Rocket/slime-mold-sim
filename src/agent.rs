@@ -1,6 +1,7 @@
 
 
 
+#[derive(Clone)]
 pub struct Agent {
     pub x: f32,
     pub y: f32,
